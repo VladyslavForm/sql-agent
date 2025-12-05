@@ -1,7 +1,7 @@
 import requests
 import json
 
-# Simple prompt templates
+# Enhanced prompt templates with Ukrainian support
 SQL_GENERATION_TEMPLATE = """Given this PostgreSQL database schema:
 {schema}
 
@@ -9,52 +9,106 @@ Generate a SQL query to answer this question: {question}
 
 CRITICAL REQUIREMENTS:
 - Use only SELECT statements (no INSERT/UPDATE/DELETE/DROP)
-- ALL time values are in SECONDS - always convert to hours by dividing by 3600
-- Data is only available until 2025-11-21, adjust date ranges accordingly
-- For "recent" queries, use dates like '2025-11-01' to '2025-11-21'
+- ⚠️ CRITICAL: ALL time values are in MICROSECONDS - ALWAYS divide by 3600000000.0 (NOT 3600) ⚠️
+- WRONG: time_spent / 3600.0 
+- CORRECT: time_spent / 3600000000.0
+- Today's date: {current_date}
+- Available data range: 2022-01-01 to 2025-11-21 (latest data cutoff)
+
+TEMPORAL REASONING:
+- Data ends on 2025-11-21, so use the most recent available period for "recent" queries
+- "last week/previous week" = most recent 7-day period with data (2025-11-14 to 2025-11-21)
+- "recent/lately" = last 30 days of available data (2025-10-22 to 2025-11-21)
+- "this month" = November 2025 (current month of latest data)
+- "since beginning of year" = January 1st 2025 to latest available
+- Prioritize finding actual data over perfect date alignment
+
+PRACTICAL DATE RANGES (use these for better results):
+```sql
+-- Recent week activity (use latest available 7 days)
+WHERE date_column >= '2025-11-14' AND date_column <= '2025-11-21'
+
+-- Recent activity (last 30 days of data)  
+WHERE date_column >= '2025-10-22' AND date_column <= '2025-11-21'
+
+-- Recent month activity
+WHERE date_column >= '2025-11-01' AND date_column <= '2025-11-21'
+
+-- Since beginning of year
+WHERE date_column >= '2025-01-01'
+
+-- Alternative: Use relative dates but constrain to available data
+WHERE date_column >= GREATEST('2025-11-14', DATE_TRUNC('week', '2025-11-21'::date - INTERVAL '1 week'))
+AND date_column <= '2025-11-21'
+```
+
+LANGUAGE MAPPINGS (Ukrainian → English):
+- команда/team → team.name
+- проект/project → project.name  
+- розробник/developer → developer/employee
+- відпуск/vacation → vacation data
+- спеціалізація/specialization → developer.specialization
+- години/hours → time_spent/time_estimate (convert from microseconds)
+
+SCHEMA RELATIONSHIPS:
+- employee.team_id → team.team_id
+- employee.clickup_id → developer.clickup_id (for specializations)
+- task_employee links tasks to employees
+- project_employee links projects to employees
 
 QUERY PATTERNS:
 
-For team activity queries:
+For team activity/project hours (активність команди):
 ```sql
--- Find most active project in team by hours
-SELECT p.name, (p.time_spent / 3600.0) as hours_spent
-FROM project p 
-WHERE p.team = 'TeamName' 
-  AND p.date_updated >= '2025-11-01'
-ORDER BY p.time_spent DESC 
+-- Most active project by hours in team (recent week)
+SELECT 
+  p.name as project_name,
+  SUM(t.time_spent) / 3600000000.0 as total_hours
+FROM project p
+JOIN task t ON t.clickup_id = p.clickup_id
+JOIN task_employee te ON t.task_id = te.task_id
+JOIN employee e ON te.employee_id = e.employee_id
+JOIN team tm ON e.team_id = tm.team_id
+WHERE tm.name = 'Fusion' 
+  AND t.date_updated >= '2025-11-14' 
+  AND t.date_updated <= '2025-11-21'
+  AND t.time_spent IS NOT NULL
+GROUP BY p.project_id, p.name
+ORDER BY total_hours DESC
 LIMIT 1;
 ```
 
-For team composition queries:
-```sql  
--- Get team composition by role
-SELECT t.name as team_name, e.position, COUNT(*) as count
-FROM team t 
+For team composition by specialization (композиція команди):
+```sql
+-- Team composition with developer specializations
+SELECT 
+  t.name as team_name,
+  COALESCE(d.specialization, 'Unknown') as specialization,
+  COUNT(DISTINCT e.employee_id) as developer_count
+FROM team t
 JOIN employee e ON t.team_id = e.team_id
-GROUP BY t.name, e.position
-ORDER BY t.name, count DESC;
+LEFT JOIN developer d ON e.clickup_id = d.clickup_id
+GROUP BY t.name, COALESCE(d.specialization, 'Unknown')
+ORDER BY t.name, developer_count DESC;
 ```
 
-For time estimate vs actual analysis:
+For vacation queries (відпуск):
 ```sql
--- Compare estimates vs actual time for team
+-- Alpha team vacation days since New Year
 SELECT 
-  AVG((t.time_estimate - t.time_spent) / 3600.0) as avg_hours_difference
-FROM task t
-JOIN task_employee te ON t.task_id = te.task_id  
-JOIN employee e ON te.employee_id = e.employee_id
-JOIN team tm ON e.team_id = tm.team_id
-WHERE tm.name = 'TeamName'
-  AND t.time_estimate IS NOT NULL 
-  AND t.time_spent IS NOT NULL;
+  e.name as employee_name,
+  e.employee_id,
+  'Use vacation.py data integration' as vacation_note
+FROM employee e
+JOIN team t ON e.team_id = t.team_id
+WHERE t.name = 'Alpha';
 ```
 
 IMPORTANT:
-- Always convert seconds to hours using "/ 3600.0" 
-- Use proper JOINs to connect tables
-- Filter by realistic date ranges (2022-2025)
-- Include meaningful column aliases
+- Always convert microseconds to hours using "/ 3600000000.0"
+- Use LEFT JOINs when data might be missing
+- Handle NULL values with COALESCE
+- For vacation queries, note that external vacation data integration is needed
 - Return only the SQL query, no explanation
 
 SQL Query:"""
@@ -78,7 +132,11 @@ Failed SQL Query:
 Error Message:
 {error}
 
-Please fix the SQL query to resolve this error. Return only the corrected SQL query, no explanation.
+Please fix the SQL query to resolve this error. 
+
+CRITICAL: Time values are in MICROSECONDS - always convert to hours by dividing by 3600000000.0 (not 3600)
+
+Return only the corrected SQL query, no explanation.
 
 Corrected SQL:"""
 
@@ -144,11 +202,15 @@ def call_openrouter(config, messages):
 def generate_sql(config, question, schema):
     """Generate SQL query from natural language question."""
     from database import format_schema_for_llm
+    from datetime import date
+    
     schema_text = format_schema_for_llm(schema)
+    current_date = date.today().strftime('%Y-%m-%d')
     
     prompt = SQL_GENERATION_TEMPLATE.format(
         schema=schema_text,
-        question=question
+        question=question,
+        current_date=current_date
     )
     
     messages = [{'role': 'user', 'content': prompt}]
@@ -216,10 +278,10 @@ def format_and_enhance_data(data, question):
     for row in data:
         enhanced_row = {}
         for key, value in row.items():
-            # Convert large numbers that look like time in seconds to hours
-            if isinstance(value, (int, float)) and value > 3600 and ('time' in key.lower() or 'spent' in key.lower()):
-                hours = value / 3600.0
-                enhanced_row[key] = f"{value} seconds ({hours:.1f} hours)"
+            # Convert large numbers that look like time in microseconds to hours
+            if isinstance(value, (int, float)) and value > 3600000 and ('time' in key.lower() or 'spent' in key.lower() or 'hours' in key.lower()):
+                hours = value / 3600000000.0
+                enhanced_row[key] = f"{hours:.1f} hours"
             # Format other large numbers
             elif isinstance(value, (int, float)) and value > 1000000:
                 enhanced_row[key] = f"{value:,}"

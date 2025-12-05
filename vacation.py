@@ -48,7 +48,7 @@ def match_vacation_users(vacation_data: Dict[str, Any], config: Dict[str, Any]) 
         print("Matching ClickUp users to database employees...")
         
         # Get developers from database
-        dev_query = "SELECT id, clickup_id, name FROM developer WHERE clickup_id IS NOT NULL"
+        dev_query = "SELECT developer_id, clickup_id, name FROM developer WHERE clickup_id IS NOT NULL"
         db_developers = execute_query(config, dev_query)
         
         if not db_developers:
@@ -61,7 +61,7 @@ def match_vacation_users(vacation_data: Dict[str, Any], config: Dict[str, Any]) 
         
         for db_dev in db_developers:
             clickup_id = db_dev.get('clickup_id')
-            employee_id = db_dev.get('id')
+            employee_id = db_dev.get('developer_id')
             name = db_dev.get('name', 'Unknown')
             
             if clickup_id and employee_id:

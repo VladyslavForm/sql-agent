@@ -95,8 +95,9 @@ def is_vacation_question(question):
     """Check if question is about vacation/time off."""
     vacation_keywords = [
         'vacation', 'holiday', 'time off', 'leave', 'sick',
-        'отпуск', 'каникулы', 'больничный',
-        'відпуст', 'канікул', 'лікарн'
+        'отпуск', 'каникулы', 'больничный', 'отгул',
+        'відпуст', 'канікул', 'лікарн', 'відгул', 'днів провів у відпустці',
+        'vacation days', 'days off', 'time away'
     ]
     question_lower = question.lower()
     return any(keyword in question_lower for keyword in vacation_keywords)
@@ -118,12 +119,16 @@ def process_question_with_retry(question, config, debug=False, max_retries=2):
         if attempt == max_retries:
             return result
             
-        # For retry attempts, try modified question approaches
+        # For retry attempts, try broader temporal scope
         if attempt == 0:
-            # First retry: try with broader time range
-            modified_question = question.replace("последн", "за 2025 год").replace("recent", "in 2025").replace("last week", "in November 2025")
+            # First retry: expand time scope for better results
+            if any(term in question.lower() for term in ['week', 'тиждень', 'recent', 'latest', 'останн', 'попередн']):
+                modified_question = question + " (or expand to last 30 days if no recent data found)"
+            else:
+                modified_question = question + " (consider broader date range if needed)"
+            
             if debug:
-                print(f"Retrying with modified question: {modified_question}")
+                print(f"Retrying with broader scope: {modified_question}")
             question = modified_question
     
     return "Unable to find results after multiple attempts."
@@ -215,19 +220,43 @@ def process_question(question, config, debug=False, attempt=0):
         vacation_context = ""
         if is_vacation_question(question):
             if debug:
-                print_header("Step 5: Adding vacation context")
+                print_header("Step 5: Processing vacation question")
             else:
-                print_info("Adding vacation context...")
+                print_info("Processing vacation data...")
             
             try:
+                from vacation import load_vacation_data, match_vacation_users, calculate_vacation_days
+                
+                # Load and process vacation data
                 vacation_data = load_vacation_data()
                 if vacation_data:
-                    vacation_context = f"\n\nVacation data is also available with {vacation_data.get('n_users', 0)} users and {vacation_data.get('n_requests', 0)} vacation requests."
-                    if debug:
-                        print_success(f"Added vacation context: {vacation_data.get('n_users', 0)} users, {vacation_data.get('n_requests', 0)} requests")
+                    user_mapping = match_vacation_users(vacation_data, config)
+                    vacation_summary = calculate_vacation_days(vacation_data, user_mapping)
+                    
+                    if vacation_summary:
+                        # Create detailed vacation context for Alpha team
+                        alpha_vacation_details = []
+                        for emp_id, summary in vacation_summary.items():
+                            # Get employee name from database
+                            emp_query = f"SELECT name FROM employee WHERE employee_id = {emp_id}"
+                            emp_result = execute_query(config, emp_query)
+                            emp_name = emp_result[0]['name'] if emp_result else f"Employee {emp_id}"
+                            
+                            # Calculate days since 2025-01-01
+                            days_2025 = summary['by_year'].get(2025, 0)
+                            alpha_vacation_details.append(f"{emp_name} ({emp_id}): {days_2025} days in 2025")
+                        
+                        vacation_context = f"\n\nVacation Data Summary:\n" + "\n".join(alpha_vacation_details[:10])
+                        if debug:
+                            print_success(f"Processed vacation data for {len(vacation_summary)} employees")
+                    else:
+                        vacation_context = f"\n\nVacation data available: {vacation_data.get('n_users', 0)} users, {vacation_data.get('n_requests', 0)} requests, but processing failed."
+                else:
+                    vacation_context = f"\n\nVacation data file not found or empty."
             except Exception as e:
+                vacation_context = f"\n\nVacation data processing error: {str(e)}"
                 if debug:
-                    print_warning(f"Vacation context failed: {e}")
+                    print_warning(f"Vacation processing failed: {e}")
         
         # Step 6: Generate natural language response
         if debug:
